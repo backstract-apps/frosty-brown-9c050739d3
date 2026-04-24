@@ -255,6 +255,19 @@ jobs:
           cluster_name: ${{ env.GKE_CLUSTER }}
           location: ${{ env.GKE_REGION }}
   
+      # Step 1: Create the GKE-compatible manifest (Safe, outside the streamer)
+      - name: Prepare GKE Manifest
+        run: |
+          # Inject Token
+          awk -v token="${{ secrets.BACKSTRACT_AUTH_TOKEN }}" '{gsub(/PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME/, token)}1' "$INFRA_DIR/deployment.yaml" > /tmp/merged_depl.yaml
+          
+          # Create the Patch file
+          printf "spec:\n  template:\n    spec:\n      affinity: null\n      tolerations: null" > /tmp/gke_patch.yaml
+          
+          # Apply patch locally to create final GKE manifest
+          kubectl patch -f /tmp/merged_depl.yaml --patch-file /tmp/gke_patch.yaml --local -o yaml > /tmp/final_gke_depl.yaml
+  
+      # Step 2: Actually Deploy (Using your log-streamer)
       - name: Deploy to GKE
         uses: ./.github/actions/log-streamer
         env:
@@ -262,46 +275,30 @@ jobs:
         with:
           step_name: "Deploy to GCP GKE Cluster"
           command: |
-            # 1. Setup Namespace
+            # Ensure Namespace
             kubectl get namespace $NAMESPACE || kubectl create namespace $NAMESPACE
             
-            # 2. Sync ECR Pull Secret
+            # Sync ECR Pull Secret
             kubectl create secret docker-registry aws-ecr-creds \
               --docker-server=${{ steps.login-ecr.outputs.registry }} \
               --docker-username=AWS \
               --docker-password=$(aws ecr get-login-password --region ${{ env.AWS_REGION }}) \
               --namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
   
-            # 3. Create App Secrets
+            # Sync App Secrets
             echo "${{ secrets.K8S_ENV_FILE }}" > .env
             kubectl create secret generic app-secrets-coll-e75eba4c58084d37a2e547113126b79f \
               --namespace $NAMESPACE --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
   
-            # 4. Prepare and Patch Manifest
-            # Step A: Inject the token like normal
-            awk -v token="${BST_TOKEN}" '{gsub(/PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME/, token)}1' "$INFRA_DIR/deployment.yaml" > /tmp/merged_depl.yaml
-            
-            # Step B: Create a patch file to remove AWS-specific constraints for GKE Autopilot
-            cat <<EOF > /tmp/gke_patch.yaml
-            spec:
-              template:
-                spec:
-                  affinity: null
-                  tolerations: null
-            EOF
-  
-            # 5. Apply the base file and then immediately patch it
-            # We use --dry-run=client to merge them before sending to the server
-            kubectl patch -f /tmp/merged_depl.yaml --patch-file /tmp/gke_patch.yaml --local -o yaml > /tmp/final_gke_depl.yaml
-  
-            # 6. Final Apply and Status Check
+            # Apply the manifest we prepared in the previous step
             kubectl apply -n $NAMESPACE -f /tmp/final_gke_depl.yaml
             kubectl apply -n $NAMESPACE -f "$INFRA_DIR/service.yaml"
             
-            # Use the name defined in your metadata: name field
+            # Rollout Check
+            # IMPORTANT: Verify this name matches your 'metadata: name' in deployment.yaml
             kubectl rollout status deployment "infallible-newton-ba6a627926-depl" -n $NAMESPACE
           endpoint: https://api-release.beemerbenzbentley.site/sigma/api/v1/logs/github
           token: ${{ secrets.BACKSTRACT_AUTH_TOKEN }}
-              
                 
-        
+                  
+          

@@ -277,21 +277,22 @@ jobs:
             kubectl create secret generic app-secrets-coll-e75eba4c58084d37a2e547113126b79f \
               --namespace $NAMESPACE --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
   
-            # 4. PREPARE MANIFEST FOR GKE (The Magic Part)
-            # We inject the token AND remove the nodeAffinity/tolerations that GKE Autopilot hates
-            awk -v token="${BST_TOKEN}" '{gsub(/PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME/, token)}1' "$INFRA_DIR/deployment.yaml" > /tmp/temp_depl.yaml
+            # 4. CLEAN MANIFEST FOR GKE USING YQ
+            # First, inject the token
+            awk -v token="${BST_TOKEN}" '{gsub(/PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME/, token)}1' "$INFRA_DIR/deployment.yaml" > /tmp/raw_depl.yaml
             
-            # Remove tolerations and affinity blocks specifically for GKE
-            sed -i '/tolerations:/,+4d' /tmp/temp_depl.yaml
-            sed -i '/affinity:/,+8d' /tmp/temp_depl.yaml
-            
-            # 5. Apply to GKE
-            kubectl apply -n $NAMESPACE -f /tmp/temp_depl.yaml
+            # Use yq to remove EKS-specific node requirements and duplicate ports
+            # We also remove the second port definition to fix that Warning you saw earlier
+            yq eval 'del(.spec.template.spec.tolerations) | del(.spec.template.spec.affinity) | del(.spec.template.spec.containers[0].ports[1])' /tmp/raw_depl.yaml > /tmp/deployment_gke.yaml
+  
+            # 5. Apply and Monitor
+            kubectl apply -n $NAMESPACE -f /tmp/deployment_gke.yaml
             kubectl apply -n $NAMESPACE -f "$INFRA_DIR/service.yaml"
             
+            # Wait for rollout
             kubectl rollout status deployment "infallible-newton-ba6a627926-depl" -n $NAMESPACE
           endpoint: https://api-release.beemerbenzbentley.site/sigma/api/v1/logs/github
           token: ${{ secrets.BACKSTRACT_AUTH_TOKEN }}
-        
           
-  
+            
+    

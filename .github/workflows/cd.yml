@@ -264,8 +264,8 @@ jobs:
           command: |
             # 1. Setup Namespace
             kubectl get namespace $NAMESPACE || kubectl create namespace $NAMESPACE
-  
-            # 2. Sync ECR Pull Secret (The Key Bridge)
+            
+            # 2. Sync ECR Pull Secret
             kubectl create secret docker-registry aws-ecr-creds \
               --docker-server=${{ steps.login-ecr.outputs.registry }} \
               --docker-username=AWS \
@@ -277,15 +277,21 @@ jobs:
             kubectl create secret generic app-secrets-coll-e75eba4c58084d37a2e547113126b79f \
               --namespace $NAMESPACE --from-env-file=.env --dry-run=client -o yaml | kubectl apply -f -
   
-            # 4. Apply Manifests
-            awk -v token="${BST_TOKEN}" '{gsub(/PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME/, token)}1' "$INFRA_DIR/deployment.yaml" > /tmp/deployment_gke.yaml
+            # 4. PREPARE MANIFEST FOR GKE (The Magic Part)
+            # We inject the token AND remove the nodeAffinity/tolerations that GKE Autopilot hates
+            awk -v token="${BST_TOKEN}" '{gsub(/PLACEHOLDER_BST_TOKEN_REPLACE_AT_RUNTIME/, token)}1' "$INFRA_DIR/deployment.yaml" > /tmp/temp_depl.yaml
             
-            kubectl apply -n $NAMESPACE -f /tmp/deployment_gke.yaml
+            # Remove tolerations and affinity blocks specifically for GKE
+            sed -i '/tolerations:/,+4d' /tmp/temp_depl.yaml
+            sed -i '/affinity:/,+8d' /tmp/temp_depl.yaml
+            
+            # 5. Apply to GKE
+            kubectl apply -n $NAMESPACE -f /tmp/temp_depl.yaml
             kubectl apply -n $NAMESPACE -f "$INFRA_DIR/service.yaml"
             
             kubectl rollout status deployment "infallible-newton-ba6a627926-depl" -n $NAMESPACE
           endpoint: https://api-release.beemerbenzbentley.site/sigma/api/v1/logs/github
           token: ${{ secrets.BACKSTRACT_AUTH_TOKEN }}
-      
         
-
+          
+  
